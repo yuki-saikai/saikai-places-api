@@ -123,7 +123,7 @@ def plan(
         # 2) 中心近傍の駅候補を取得
         candidate_nearby = gm.places_nearby(
             location=(centroid_lat, centroid_lng),
-            radius=max(radius_m, 3000),
+            radius=max(radius_m, 5000),
             type="train_station",
             language=language,
         )
@@ -177,7 +177,15 @@ def plan(
                 best_sum = sum_d
 
         if best_idx is None:
-            raise HTTPException(status_code=404, detail="central station not found")
+            # 交通所要時間が取れない場合は、地理的中心に最も近い駅を採用
+            def _sqdist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+                return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+            centroid = (centroid_lat, centroid_lng)
+            best_idx = min(
+                range(len(dest_coords)),
+                key=lambda i: _sqdist(dest_coords[i], centroid),
+            )
 
         best = candidates[best_idx]
         best_loc = best.get("geometry", {}).get("location") or {}
