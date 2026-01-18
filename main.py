@@ -41,6 +41,18 @@ def _to_lat_lng(geo_item: dict) -> Tuple[float, float]:
     return loc["lat"], loc["lng"]
 
 
+def _dedupe_candidates(items: List[dict]) -> List[dict]:
+    seen = set()
+    out = []
+    for it in items:
+        pid = it.get("place_id")
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        out.append(it)
+    return out
+
+
 @app.get("/plan")
 def plan(
     station_name: List[str] = Query(...),
@@ -120,14 +132,27 @@ def plan(
         centroid_lat = sum(c[0] for c in origin_coords) / len(origin_coords)
         centroid_lng = sum(c[1] for c in origin_coords) / len(origin_coords)
 
-        # 2) 中心近傍の駅候補を取得
-        candidate_nearby = gm.places_nearby(
+        # 2) 駅候補を広めに収集（各駅周辺 + 中央付近）
+        candidate_results: List[dict] = []
+        candidate_radius = max(radius_m, 8000)
+        for lat, lng in origin_coords:
+            res = gm.places_nearby(
+                location=(lat, lng),
+                radius=candidate_radius,
+                type="train_station",
+                language=language,
+            )
+            candidate_results.extend(res.get("results") or [])
+
+        centroid_res = gm.places_nearby(
             location=(centroid_lat, centroid_lng),
-            radius=max(radius_m, 5000),
+            radius=candidate_radius,
             type="train_station",
             language=language,
         )
-        candidates = (candidate_nearby.get("results") or [])[:20]
+        candidate_results.extend(centroid_res.get("results") or [])
+
+        candidates = _dedupe_candidates(candidate_results)[:40]
         if not candidates:
             raise HTTPException(
                 status_code=404, detail="central station candidates not found"
@@ -183,8 +208,7 @@ def plan(
 
             centroid = (centroid_lat, centroid_lng)
             best_idx = min(
-                range(len(dest_coords)),
-                key=lambda i: _sqdist(dest_coords[i], centroid),
+                range(len(dest_coords)), key=lambda i: _sqdist(dest_coords[i], centroid)
             )
 
         best = candidates[best_idx]
