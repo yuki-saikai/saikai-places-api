@@ -26,18 +26,6 @@ def gmaps() -> googlemaps.Client:
     return _gmaps
 
 
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok"}
-
-
-@app.get("/ready")
-def ready():
-    # 依存が満たされているかの簡易チェック
-    ok = os.environ.get("GMP_API_KEY") is not None
-    return {"ready": ok, "missing": [] if ok else ["GMP_API_KEY"]}
-
-
 @app.get("/plan")
 def plan(
     station_name: str,
