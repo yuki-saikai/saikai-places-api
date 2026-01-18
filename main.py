@@ -3,6 +3,7 @@ import os
 from typing import List, Optional, Tuple
 from fastapi import FastAPI, HTTPException, Query
 import googlemaps
+from googlemaps import exceptions as gmaps_exceptions
 
 app = FastAPI(title="saikai-places-api", version="0.1.0")
 
@@ -159,18 +160,38 @@ def plan(
             )
 
         dest_coords: List[Tuple[float, float]] = []
+        filtered_candidates: List[dict] = []
         for c in candidates:
             loc = c.get("geometry", {}).get("location") or {}
-            dest_coords.append((loc.get("lat"), loc.get("lng")))
+            lat = loc.get("lat")
+            lng = loc.get("lng")
+            if lat is None or lng is None:
+                continue
+            filtered_candidates.append(c)
+            dest_coords.append((lat, lng))
+
+        if not dest_coords:
+            raise HTTPException(
+                status_code=404, detail="central station candidates not found"
+            )
 
         # 3) 交通利便性（transitの所要時間）で最良候補を選ぶ
-        matrix = gm.distance_matrix(
-            origins=origin_coords,
-            destinations=dest_coords,
-            mode="transit",
-            language=language,
-            region=region,
-        )
+        try:
+            matrix = gm.distance_matrix(
+                origins=origin_coords,
+                destinations=dest_coords,
+                mode="transit",
+                language=language,
+                region=region,
+            )
+        except gmaps_exceptions.ApiError as e:
+            raise HTTPException(
+                status_code=502, detail=f"distance matrix error: {e.status}"
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=502, detail=f"distance matrix error: {type(e).__name__}"
+            )
 
         best_idx = None
         best_max = None
@@ -211,7 +232,7 @@ def plan(
                 range(len(dest_coords)), key=lambda i: _sqdist(dest_coords[i], centroid)
             )
 
-        best = candidates[best_idx]
+        best = filtered_candidates[best_idx]
         best_loc = best.get("geometry", {}).get("location") or {}
         best_lat = best_loc.get("lat")
         best_lng = best_loc.get("lng")
@@ -251,6 +272,8 @@ def plan(
 
     except HTTPException:
         raise
+    except gmaps_exceptions.ApiError as e:
+        raise HTTPException(status_code=502, detail=f"gmaps api error: {e.status}")
     except Exception as e:
         # 生の例外は出さず、型だけ返す（ログ汚染を防ぐ）
         raise HTTPException(
