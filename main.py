@@ -155,9 +155,7 @@ def plan(
 
         candidates = _dedupe_candidates(candidate_results)[:40]
         if not candidates:
-            raise HTTPException(
-                status_code=404, detail="central station candidates not found"
-            )
+            raise HTTPException(status_code=404, detail="central station candidates not found")
 
         dest_coords: List[Tuple[float, float]] = []
         filtered_candidates: List[dict] = []
@@ -171,56 +169,54 @@ def plan(
             dest_coords.append((lat, lng))
 
         if not dest_coords:
-            raise HTTPException(
-                status_code=404, detail="central station candidates not found"
-            )
+            raise HTTPException(status_code=404, detail="central station candidates not found")
 
         # 3) 交通利便性（transitの所要時間）で最良候補を選ぶ
-        try:
-            matrix = gm.distance_matrix(
-                origins=origin_coords,
-                destinations=dest_coords,
-                mode="transit",
-                language=language,
-                region=region,
-            )
-        except gmaps_exceptions.ApiError as e:
-            raise HTTPException(
-                status_code=502, detail=f"distance matrix error: {e.status}"
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=502, detail=f"distance matrix error: {type(e).__name__}"
-            )
-
         best_idx = None
         best_max = None
         best_sum = None
-        rows = matrix.get("rows") or []
-        for j in range(len(dest_coords)):
-            durations = []
-            for i in range(len(origin_coords)):
-                try:
-                    elem = rows[i]["elements"][j]
-                except Exception:
-                    elem = None
-                if not elem or elem.get("status") != "OK":
-                    durations = []
-                    break
-                durations.append(elem["duration"]["value"])
-            if not durations:
-                continue
 
-            max_d = max(durations)
-            sum_d = sum(durations)
-            if (
-                best_idx is None
-                or max_d < best_max
-                or (max_d == best_max and sum_d < best_sum)
-            ):
-                best_idx = j
-                best_max = max_d
-                best_sum = sum_d
+        # Distance Matrixの上限対策: 1リクエストあたりの要素数を制限
+        max_elements = 100
+        max_dest_per_batch = max(1, max_elements // max(1, len(origin_coords)))
+
+        for batch_start in range(0, len(dest_coords), max_dest_per_batch):
+            batch_dest = dest_coords[batch_start: batch_start + max_dest_per_batch]
+            try:
+                matrix = gm.distance_matrix(
+                    origins=origin_coords,
+                    destinations=batch_dest,
+                    mode="transit",
+                    language=language,
+                    region=region,
+                )
+            except gmaps_exceptions.ApiError as e:
+                raise HTTPException(status_code=502, detail=f"distance matrix error: {e.status}")
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"distance matrix error: {type(e).__name__}")
+
+            rows = matrix.get("rows") or []
+            for j in range(len(batch_dest)):
+                durations = []
+                for i in range(len(origin_coords)):
+                    try:
+                        elem = rows[i]["elements"][j]
+                    except Exception:
+                        elem = None
+                    if not elem or elem.get("status") != "OK":
+                        durations = []
+                        break
+                    durations.append(elem["duration"]["value"])
+                if not durations:
+                    continue
+
+                max_d = max(durations)
+                sum_d = sum(durations)
+                global_idx = batch_start + j
+                if best_idx is None or max_d < best_max or (max_d == best_max and sum_d < best_sum):
+                    best_idx = global_idx
+                    best_max = max_d
+                    best_sum = sum_d
 
         if best_idx is None:
             # 交通所要時間が取れない場合は、地理的中心に最も近い駅を採用
@@ -228,9 +224,7 @@ def plan(
                 return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
             centroid = (centroid_lat, centroid_lng)
-            best_idx = min(
-                range(len(dest_coords)), key=lambda i: _sqdist(dest_coords[i], centroid)
-            )
+            best_idx = min(range(len(dest_coords)), key=lambda i: _sqdist(dest_coords[i], centroid))
 
         best = filtered_candidates[best_idx]
         best_loc = best.get("geometry", {}).get("location") or {}
