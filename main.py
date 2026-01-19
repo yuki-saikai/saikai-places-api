@@ -1,6 +1,7 @@
 # main.py --- v0.2 (middle station finder)
 import os
 import statistics
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel
@@ -81,12 +82,16 @@ def _get_transit_duration_seconds(
     経路が見つからない場合はNoneを返す。
     """
     try:
+        # 公共交通機関では出発時刻の指定が重要（その日の朝9時を基準にする）
+        today = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+
         routes = gm.directions(
             origin=origin,
             destination=destination,
             mode="transit",
             language=language,
             region=region,
+            departure_time=today,
             alternatives=False,
         )
         if not routes:
@@ -94,9 +99,12 @@ def _get_transit_duration_seconds(
 
         duration = routes[0].get("legs", [{}])[0].get("duration", {}).get("value")
         return duration
-    except gmaps_exceptions.ApiError:
+    except gmaps_exceptions.ApiError as e:
+        # APIエラーの詳細をログ出力（本番では適切なロギングに置き換える）
+        print(f"API Error for {origin} -> {destination}: {e.status}")
         return None
-    except Exception:
+    except Exception as e:
+        print(f"Exception for {origin} -> {destination}: {type(e).__name__} - {str(e)}")
         return None
 
 
