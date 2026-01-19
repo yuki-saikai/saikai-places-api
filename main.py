@@ -123,6 +123,9 @@ def _find_middle_stations(
     分散が小さい（=各駅から均等にアクセスしやすい）上位N駅を返す。
     """
     terminal_data = []
+    min_required_routes = max(
+        2, len(input_stations) // 2
+    )  # 最低でも半数以上の駅から経路が必要
 
     for terminal in terminal_stations:
         durations = []
@@ -136,13 +139,16 @@ def _find_middle_stations(
                 durations.append(duration)
                 duration_details[station] = duration
 
-        # 全ての入力駅からルートが見つからない場合はスキップ
-        if not durations:
+        # 最低限必要な経路数が見つからない場合はスキップ
+        if len(durations) < min_required_routes:
             continue
 
-        # 一部の駅からしかルートがない場合はペナルティを与える
+        # 分散を計算（一部の駅からしかルートがない場合はペナルティ）
         if len(durations) < len(input_stations):
-            variance = float("inf")
+            # 欠損駅の数に応じてペナルティを加算
+            base_variance = _calculate_variance(durations) if len(durations) > 1 else 0
+            missing_penalty = (len(input_stations) - len(durations)) * 10000
+            variance = base_variance + missing_penalty
         else:
             variance = _calculate_variance(durations)
 
@@ -154,6 +160,8 @@ def _find_middle_stations(
                     sum(durations) / len(durations) / 60 if durations else None
                 ),
                 "durations": duration_details,
+                "route_count": len(durations),
+                "total_stations": len(input_stations),
             }
         )
 
@@ -214,6 +222,8 @@ def plan(request: PlanRequest = Body(...)):
                         if ms["avg_duration_minutes"]
                         else None
                     ),
+                    "route_count": ms.get("route_count"),
+                    "durations_seconds": ms.get("durations"),
                 }
                 for ms in middle_stations
             ],
