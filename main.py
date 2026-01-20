@@ -40,6 +40,9 @@ class PlanRequest(BaseModel):
     station_names: List[str]
     language: str = "ja"
     region: str = "JP"
+    restaurant_type: str = (
+        "restaurant"  # Google Places API type (restaurant, cafe, etc.)
+    )
 
 
 # ---- Google Maps Client ----
@@ -120,6 +123,78 @@ def _calculate_variance(durations: List[int]) -> float:
         return float("inf")
 
 
+def _get_station_location(
+    gm: googlemaps.Client, station_name: str, region: str
+) -> Optional[Dict]:
+    """
+    Get latitude and longitude for a station.
+    """
+    try:
+        geocode_result = gm.geocode(station_name, region=region)
+        if geocode_result:
+            location = geocode_result[0]["geometry"]["location"]
+            return {"lat": location["lat"], "lng": location["lng"]}
+    except Exception as e:
+        print(f"Error geocoding {station_name}: {e}")
+    return None
+
+
+def _search_nearby_restaurants(
+    gm: googlemaps.Client,
+    location: Dict,
+    place_type: str = "restaurant",
+    radius: int = 500,
+    language: str = "ja",
+) -> List[Dict]:
+    """
+    Search for restaurants within radius using Places API.
+    Returns up to 20 results (prominence order).
+    """
+    try:
+        places_result = gm.places_nearby(
+            location=(location["lat"], location["lng"]),
+            radius=radius,
+            type=place_type,
+            language=language,
+        )
+
+        restaurants = []
+        for place in places_result.get("results", []):
+            # Skip permanently closed businesses
+            if place.get("business_status") == "CLOSED_PERMANENTLY":
+                continue
+
+            # Build photo URL if available
+            photo_url = None
+            if place.get("photos"):
+                photo_ref = place["photos"][0].get("photo_reference")
+                if photo_ref:
+                    photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_ref}&key={os.environ.get('GMP_API_KEY')}"
+
+            # Build Google Maps URL
+            place_id = place.get("place_id")
+            maps_url = (
+                f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+                if place_id
+                else None
+            )
+
+            restaurants.append(
+                {
+                    "name": place.get("name"),
+                    "rating": place.get("rating"),
+                    "photo_url": photo_url,
+                    "maps_url": maps_url,
+                }
+            )
+
+        return restaurants
+
+    except Exception as e:
+        print(f"Error searching restaurants: {e}")
+        return []
+
+
 def _find_middle_stations(
     gm: googlemaps.Client,
     input_stations: List[str],
@@ -158,6 +233,7 @@ def _find_middle_stations(
                 "avg_duration_minutes": (
                     (sum(durations) / len(durations) / 60) if durations else 0
                 ),
+                "max_duration_minutes": (max(durations) / 60 if durations else 0),
                 "durations": duration_map,
                 "route_count": len(durations),
             }
@@ -186,5 +262,18 @@ def plan(request: PlanRequest = Body(...)):
 
     if not results:
         raise HTTPException(status_code=404, detail="No suitable middle stations found")
+
+    # Add restaurant search for each middle station
+    for station_data in results:
+        station_name = station_data["station"]
+        location = _get_station_location(gm, station_name, request.region)
+
+        if location:
+            restaurants = _search_nearby_restaurants(
+                gm, location, request.restaurant_type, language=request.language
+            )
+            station_data["restaurants"] = restaurants
+        else:
+            station_data["restaurants"] = []
 
     return {"input_stations": stations, "middle_stations": results}
