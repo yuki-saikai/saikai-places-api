@@ -163,7 +163,7 @@ def _find_middle_stations(
             }
         )
 
-    terminal_data.sort(key=lambda x: x["variance"])
+    terminal_data.sort(key=lambda x: x["avg_duration_minutes"])
     return terminal_data[:top_n]
 
 
