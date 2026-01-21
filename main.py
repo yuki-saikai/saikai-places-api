@@ -149,6 +149,32 @@ def _search_nearby_restaurants(
     """
     Search for restaurants within radius using Places API.
     Returns up to 20 results (prominence order).
+    
+    Supported place_type values (Google Places API - Table 1):
+    - restaurant (default)
+    - cafe
+    - bar
+    - bakery
+    - meal_delivery
+    - meal_takeaway
+    - night_club
+    - food (general category)
+    
+    Other common types:
+    - tourist_attraction
+    - park
+    - museum
+    - shopping_mall
+    - amusement_park
+    - aquarium
+    - art_gallery
+    - bowling_alley
+    - movie_theater
+    - spa
+    - gym
+    - library
+    
+    For full list, see: https://developers.google.com/maps/documentation/places/web-service/supported_types
     """
     try:
         places_result = gm.places_nearby(
