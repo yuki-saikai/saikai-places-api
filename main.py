@@ -1,11 +1,14 @@
-# main.py --- v0.3 (simplified)
+# main.py --- v0.4 (with Gemini integration)
 import os
 import statistics
+import json
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel
 import googlemaps
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -57,6 +60,21 @@ def get_gmaps() -> googlemaps.Client:
             raise HTTPException(status_code=500, detail="GMP_API_KEY is not set")
         _gmaps = googlemaps.Client(key=key)
     return _gmaps
+
+
+# ---- Gemini Client ----
+_gemini_model: Optional[genai.GenerativeModel] = None
+
+
+def get_gemini_model() -> genai.GenerativeModel:
+    global _gemini_model
+    if _gemini_model is None:
+        key = os.environ.get("GEMINI_API_KEY")
+        if not key:
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not set")
+        genai.configure(api_key=key)
+        _gemini_model = genai.GenerativeModel("gemini-3.0-flash")
+    return _gemini_model
 
 
 # ---- Helpers ----
@@ -221,6 +239,122 @@ def _search_nearby_restaurants(
         return []
 
 
+def _load_prompt_template() -> str:
+    """
+    Load prompt template from file.
+    """
+    try:
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "prompts", "recommend_restaurants.txt"
+        )
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        print(f"Error loading prompt template: {e}")
+        raise HTTPException(
+            status_code=500, detail="Failed to load prompt template"
+        )
+
+
+def _parse_json_from_response(response_text: str) -> Optional[Dict]:
+    """
+    Extract and parse JSON from Gemini response.
+    Handles cases where JSON might be wrapped in markdown code blocks.
+    """
+    try:
+        # Try direct parsing first
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        # Try to extract JSON from markdown code blocks
+        json_pattern = r"```(?:json)?\s*({.*?})\s*```"
+        match = re.search(json_pattern, response_text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to find JSON object directly in text
+        json_pattern = r"{.*}"
+        match = re.search(json_pattern, response_text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+    
+    return None
+
+
+def _get_gemini_recommendations(
+    station_name: str, restaurants: List[Dict]
+) -> Dict:
+    """
+    Get restaurant recommendations from Gemini API.
+    Returns structured recommendations with error handling.
+    """
+    if not restaurants:
+        return {
+            "station": station_name,
+            "recommendations": [],
+            "error": "No restaurants available for recommendation"
+        }
+    
+    try:
+        model = get_gemini_model()
+        prompt_template = _load_prompt_template()
+        
+        # Build restaurant list string
+        restaurant_list = "\n".join([
+            f"- {r['name']} (評価: {r.get('rating', 'N/A')})"
+            for r in restaurants
+        ])
+        
+        # Fill in template
+        prompt = prompt_template.replace("{station_name}", station_name).replace(
+            "{restaurant_list}", restaurant_list
+        )
+        
+        # Call Gemini API
+        response = model.generate_content(prompt)
+        
+        if not response or not response.text:
+            return {
+                "station": station_name,
+                "recommendations": [],
+                "error": "Gemini API returned empty response"
+            }
+        
+        # Parse JSON from response
+        parsed_data = _parse_json_from_response(response.text)
+        
+        if not parsed_data:
+            return {
+                "station": station_name,
+                "recommendations": [],
+                "error": "Failed to parse JSON from Gemini response",
+                "raw_response": response.text[:500]  # Include truncated response for debugging
+            }
+        
+        # Validate structure
+        if "recommendations" not in parsed_data:
+            return {
+                "station": station_name,
+                "recommendations": [],
+                "error": "Invalid JSON structure: missing 'recommendations' field"
+            }
+        
+        return parsed_data
+    
+    except Exception as e:
+        print(f"Error calling Gemini API for {station_name}: {e}")
+        return {
+            "station": station_name,
+            "recommendations": [],
+            "error": f"Gemini API call failed: {str(e)}"
+        }
+
+
 def _find_middle_stations(
     gm: googlemaps.Client,
     input_stations: List[str],
@@ -299,7 +433,18 @@ def plan(request: PlanRequest = Body(...)):
                 gm, location, request.restaurant_type, language=request.language
             )
             station_data["restaurants"] = restaurants
+            
+            # Get Gemini recommendations
+            gemini_recommendations = _get_gemini_recommendations(
+                station_name, restaurants
+            )
+            station_data["gemini_recommendations"] = gemini_recommendations
         else:
             station_data["restaurants"] = []
+            station_data["gemini_recommendations"] = {
+                "station": station_name,
+                "recommendations": [],
+                "error": "Failed to get station location"
+            }
 
     return {"input_stations": stations, "middle_stations": results}
