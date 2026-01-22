@@ -92,6 +92,57 @@ def _normalize_station_names(values: List[str]) -> List[str]:
     return names
 
 
+def _match_restaurant_by_name(
+    gemini_name: str, google_restaurants: List[Dict]
+) -> Optional[Dict]:
+    """
+    Match a restaurant name from Gemini response with Google Maps data.
+    Uses exact match first, then falls back to partial match.
+
+    Args:
+        gemini_name: Restaurant name from Gemini response
+        google_restaurants: List of restaurants from Google Maps API
+
+    Returns:
+        Matched restaurant data or None if no match found
+    """
+    # Step 1: Exact match (case-sensitive)
+    for restaurant in google_restaurants:
+        if restaurant["name"] == gemini_name:
+            return restaurant
+
+    # Step 2: Exact match (case-insensitive)
+    gemini_name_lower = gemini_name.lower()
+    for restaurant in google_restaurants:
+        if restaurant["name"].lower() == gemini_name_lower:
+            return restaurant
+
+    # Step 3: Partial match (contains)
+    for restaurant in google_restaurants:
+        # Check if Gemini name is contained in Google name
+        if gemini_name in restaurant["name"] or restaurant["name"] in gemini_name:
+            return restaurant
+        # Case-insensitive partial match
+        if (
+            gemini_name_lower in restaurant["name"].lower()
+            or restaurant["name"].lower() in gemini_name_lower
+        ):
+            return restaurant
+
+    # No match found
+    return None
+
+
+def _normalize_station_names(values: List[str]) -> List[str]:
+    names: List[str] = []
+    for v in values:
+        for part in v.split(","):
+            name = part.strip()
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
 def _get_transit_duration_seconds(
     gm: googlemaps.Client,
     origin: str,
@@ -199,6 +250,9 @@ def _search_nearby_restaurants(
     For full list, see: https://developers.google.com/maps/documentation/places/web-service/supported_types
     """
     try:
+        print(
+            f"🔍 Searching restaurants near location: lat={location['lat']}, lng={location['lng']}, radius={radius}m"
+        )
         places_result = gm.places_nearby(
             location=(location["lat"], location["lng"]),
             radius=radius,
@@ -236,10 +290,11 @@ def _search_nearby_restaurants(
                 }
             )
 
+        print(f"✅ Found {len(restaurants)} restaurants")
         return restaurants
 
     except Exception as e:
-        print(f"Error searching restaurants: {e}")
+        print(f"❌ Error searching restaurants: {e}")
         return []
 
 
@@ -288,19 +343,27 @@ def _parse_json_from_response(response_text: str) -> Optional[Dict]:
     return None
 
 
-def _get_gemini_recommendations(station_name: str, restaurants: List[Dict]) -> Dict:
+def _get_gemini_recommendations(
+    station_name: str, restaurants: List[Dict]
+) -> List[Dict]:
     """
-    Get restaurant recommendations from Gemini API.
-    Returns structured recommendations with error handling.
+    Get restaurant recommendations from Gemini API and merge with Google Maps data.
+
+    Args:
+        station_name: Station name
+        restaurants: List of restaurants from Google Maps API with full data
+
+    Returns:
+        List of integrated recommendations with Gemini insights + Google Maps data
     """
     if not restaurants:
-        return {
-            "station": station_name,
-            "recommendations": [],
-            "error": "No restaurants available for recommendation",
-        }
+        print(f"⚠️  No restaurants available for {station_name}")
+        return []
 
     try:
+        print(
+            f"\n🤖 Calling Gemini API for {station_name} with {len(restaurants)} restaurants..."
+        )
         client = get_gemini_client()
         prompt_template = _load_prompt_template()
 
@@ -327,42 +390,74 @@ def _get_gemini_recommendations(station_name: str, restaurants: List[Dict]) -> D
         )
 
         if not response or not response.text:
-            return {
-                "station": station_name,
-                "recommendations": [],
-                "error": "Gemini API returned empty response",
-            }
+            print(f"❌ Gemini API returned empty response for {station_name}")
+            return []
+
+        print(f"✅ Gemini API response received ({len(response.text)} chars)")
 
         # Parse JSON from response
         parsed_data = _parse_json_from_response(response.text)
 
-        if not parsed_data:
-            return {
-                "station": station_name,
-                "recommendations": [],
-                "error": "Failed to parse JSON from Gemini response",
-                "raw_response": response.text[
-                    :500
-                ],  # Include truncated response for debugging
-            }
+        if not parsed_data or "recommendations" not in parsed_data:
+            print(f"❌ Failed to parse Gemini response for {station_name}")
+            return []
 
-        # Validate structure
-        if "recommendations" not in parsed_data:
-            return {
-                "station": station_name,
-                "recommendations": [],
-                "error": "Invalid JSON structure: missing 'recommendations' field",
-            }
+        print(
+            f"📝 Parsed {len(parsed_data.get('recommendations', []))} recommendations from Gemini"
+        )
 
-        return parsed_data
+        # Integrate Gemini recommendations with Google Maps data
+        integrated_recommendations = []
+
+        print(f"🔗 Starting data integration...")
+        for gemini_rec in parsed_data["recommendations"]:
+            gemini_name = gemini_rec.get("name", "")
+
+            # Match with Google Maps data
+            google_data = _match_restaurant_by_name(gemini_name, restaurants)
+
+            if google_data:
+                match_type = (
+                    "exact_match"
+                    if google_data["name"] == gemini_name
+                    else "partial_match"
+                )
+                print(f"  ✓ '{gemini_name}' → '{google_data['name']}' ({match_type})")
+                # Successfully matched - merge data
+                integrated_recommendations.append(
+                    {
+                        "name": google_data["name"],  # Use Google Maps name (canonical)
+                        "reason": gemini_rec.get("reason", ""),
+                        "recommended_menu": gemini_rec.get("recommended_menu", ""),
+                        "rating": google_data.get("rating"),
+                        "photo_url": google_data.get("photo_url"),
+                        "maps_url": google_data.get("maps_url"),
+                        "match_status": match_type,
+                    }
+                )
+            else:
+                # No match found - include Gemini data only with warning
+                print(f"  ✗ '{gemini_name}' → No match found (using Gemini data only)")
+                integrated_recommendations.append(
+                    {
+                        "name": gemini_name,
+                        "reason": gemini_rec.get("reason", ""),
+                        "recommended_menu": gemini_rec.get("recommended_menu", ""),
+                        "rating": None,
+                        "photo_url": None,
+                        "maps_url": None,
+                        "match_status": "no_match",
+                    }
+                )
+
+        print(
+            f"✅ Integration complete: {len(integrated_recommendations)} recommendations"
+        )
+        return integrated_recommendations
 
     except Exception as e:
         print(f"Error calling Gemini API for {station_name}: {e}")
-        return {
-            "station": station_name,
-            "recommendations": [],
-            "error": f"Gemini API call failed: {str(e)}",
-        }
+        return []
 
 
 def _find_middle_stations(
@@ -396,20 +491,31 @@ def _find_middle_stations(
         if len(durations) < len(input_stations):
             variance += (len(input_stations) - len(durations)) * 10000
 
+        # Find the station with max duration
+        max_duration_station = None
+        if duration_map:
+            max_duration_station = max(duration_map, key=duration_map.get)
+
         terminal_data.append(
             {
                 "station": terminal,
                 "variance": variance,
-                "avg_duration_minutes": (
+                "avg_duration_minutes": round(
                     (sum(durations) / len(durations) / 60) if durations else 0
                 ),
-                "max_duration_minutes": (max(durations) / 60 if durations else 0),
+                "max_duration_minutes": round(max(durations) / 60 if durations else 0),
+                "max_duration_from_station": max_duration_station,
                 "durations": duration_map,
                 "route_count": len(durations),
             }
         )
 
     terminal_data.sort(key=lambda x: x["avg_duration_minutes"])
+    print(f"\n✅ Found {len(terminal_data)} candidate stations, returning top {top_n}")
+    for i, station in enumerate(terminal_data[:top_n], 1):
+        print(
+            f"  {i}. {station['station']}: avg={station['avg_duration_minutes']}min, max={station['max_duration_minutes']}min (from {station['max_duration_from_station']})"
+        )
     return terminal_data[:top_n]
 
 
@@ -456,7 +562,16 @@ def list_models():
 
 @app.post("/plan")
 def plan(request: PlanRequest = Body(...)):
+    """
+    Find optimal middle stations and get restaurant recommendations.
+    Returns integrated recommendations with Gemini insights + Google Maps data.
+    """
+    print(f"\n{'='*70}")
+    print(f"🚀 Starting /plan request")
+    print(f"{'='*70}")
+
     stations = _normalize_station_names(request.station_names)
+    print(f"📍 Input stations: {stations}")
     if len(stations) < 2:
         raise HTTPException(status_code=400, detail="At least 2 stations required")
 
@@ -466,30 +581,53 @@ def plan(request: PlanRequest = Body(...)):
     )
 
     if not results:
+        print(f"❌ No suitable middle stations found")
         raise HTTPException(status_code=404, detail="No suitable middle stations found")
 
-    # Add restaurant search for each middle station
-    for station_data in results:
+    # Build response with integrated recommendations
+    print(f"\n📦 Building response for {len(results)} candidate stations...\n")
+    response_data = {"input_stations": stations, "candidate_stations": []}
+
+    for idx, station_data in enumerate(results, 1):
         station_name = station_data["station"]
+        print(f"\n{'-'*70}")
+        print(f"🎯 Processing candidate {idx}/{len(results)}: {station_name}")
+        print(f"{'-'*70}")
+
         location = _get_station_location(gm, station_name, request.region)
 
+        candidate_info = {
+            "station": station_name,
+            "avg_duration_minutes": station_data["avg_duration_minutes"],
+            "max_duration_minutes": station_data["max_duration_minutes"],
+            "max_duration_from_station": station_data["max_duration_from_station"],
+            "recommendations": [],
+        }
+
         if location:
+            print(f"📍 Location: lat={location['lat']:.6f}, lng={location['lng']:.6f}")
             restaurants = _search_nearby_restaurants(
                 gm, location, request.restaurant_type, language=request.language
             )
-            station_data["restaurants"] = restaurants
 
-            # Get Gemini recommendations
-            gemini_recommendations = _get_gemini_recommendations(
+            # Get integrated recommendations (Gemini + Google Maps data)
+            integrated_recommendations = _get_gemini_recommendations(
                 station_name, restaurants
             )
-            station_data["gemini_recommendations"] = gemini_recommendations
+            candidate_info["recommendations"] = integrated_recommendations
+            candidate_info["total_restaurants_found"] = len(restaurants)
+            print(
+                f"✅ Completed {station_name}: {len(integrated_recommendations)} recommendations"
+            )
         else:
-            station_data["restaurants"] = []
-            station_data["gemini_recommendations"] = {
-                "station": station_name,
-                "recommendations": [],
-                "error": "Failed to get station location",
-            }
+            print(f"❌ Failed to get location for {station_name}")
+            candidate_info["error"] = "Failed to get station location"
 
-    return {"input_stations": stations, "middle_stations": results}
+        response_data["candidate_stations"].append(candidate_info)
+
+    print(f"\n{'='*70}")
+    print(
+        f"🎉 Request complete! Returning {len(response_data['candidate_stations'])} stations"
+    )
+    print(f"{'='*70}\n")
+    return response_data
