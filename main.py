@@ -1,4 +1,8 @@
-# main.py --- v0.4 (with Gemini integration)
+# main.py --- v0.6 (Gemini 3.0 support)
+# Gemini 3.0 Key Features:
+# - thinking_level: Controls reasoning depth (low for speed, high for complex tasks)
+# - temperature: Keep at 1.0 (default) for Gemini 3.0 models
+# - thought_signatures: Automatically handled by SDK
 import os
 import statistics
 import json
@@ -8,7 +12,8 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel
 import googlemaps
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -63,18 +68,17 @@ def get_gmaps() -> googlemaps.Client:
 
 
 # ---- Gemini Client ----
-_gemini_model: Optional[genai.GenerativeModel] = None
+_gemini_client: Optional[genai.Client] = None
 
 
-def get_gemini_model() -> genai.GenerativeModel:
-    global _gemini_model
-    if _gemini_model is None:
+def get_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
         key = os.environ.get("GEMINI_API_KEY")
         if not key:
             raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not set")
-        genai.configure(api_key=key)
-        _gemini_model = genai.GenerativeModel("gemini-3.0-flash")
-    return _gemini_model
+        _gemini_client = genai.Client(api_key=key)
+    return _gemini_client
 
 
 # ---- Helpers ----
@@ -167,7 +171,7 @@ def _search_nearby_restaurants(
     """
     Search for restaurants within radius using Places API.
     Returns up to 20 results (prominence order).
-    
+
     Supported place_type values (Google Places API - Table 1):
     - restaurant (default)
     - cafe
@@ -177,7 +181,7 @@ def _search_nearby_restaurants(
     - meal_takeaway
     - night_club
     - food (general category)
-    
+
     Other common types:
     - tourist_attraction
     - park
@@ -191,7 +195,7 @@ def _search_nearby_restaurants(
     - spa
     - gym
     - library
-    
+
     For full list, see: https://developers.google.com/maps/documentation/places/web-service/supported_types
     """
     try:
@@ -251,9 +255,7 @@ def _load_prompt_template() -> str:
             return f.read()
     except Exception as e:
         print(f"Error loading prompt template: {e}")
-        raise HTTPException(
-            status_code=500, detail="Failed to load prompt template"
-        )
+        raise HTTPException(status_code=500, detail="Failed to load prompt template")
 
 
 def _parse_json_from_response(response_text: str) -> Optional[Dict]:
@@ -273,7 +275,7 @@ def _parse_json_from_response(response_text: str) -> Optional[Dict]:
                 return json.loads(match.group(1))
             except json.JSONDecodeError:
                 pass
-        
+
         # Try to find JSON object directly in text
         json_pattern = r"{.*}"
         match = re.search(json_pattern, response_text, re.DOTALL)
@@ -282,13 +284,11 @@ def _parse_json_from_response(response_text: str) -> Optional[Dict]:
                 return json.loads(match.group(0))
             except json.JSONDecodeError:
                 pass
-    
+
     return None
 
 
-def _get_gemini_recommendations(
-    station_name: str, restaurants: List[Dict]
-) -> Dict:
+def _get_gemini_recommendations(station_name: str, restaurants: List[Dict]) -> Dict:
     """
     Get restaurant recommendations from Gemini API.
     Returns structured recommendations with error handling.
@@ -297,61 +297,71 @@ def _get_gemini_recommendations(
         return {
             "station": station_name,
             "recommendations": [],
-            "error": "No restaurants available for recommendation"
+            "error": "No restaurants available for recommendation",
         }
-    
+
     try:
-        model = get_gemini_model()
+        client = get_gemini_client()
         prompt_template = _load_prompt_template()
-        
+
         # Build restaurant list string
-        restaurant_list = "\n".join([
-            f"- {r['name']} (評価: {r.get('rating', 'N/A')})"
-            for r in restaurants
-        ])
-        
+        restaurant_list = "\n".join(
+            [f"- {r['name']} (評価: {r.get('rating', 'N/A')})" for r in restaurants]
+        )
+
         # Fill in template
         prompt = prompt_template.replace("{station_name}", station_name).replace(
             "{restaurant_list}", restaurant_list
         )
-        
-        # Call Gemini API
-        response = model.generate_content(prompt)
-        
+
+        # Call Gemini API with new client structure and Gemini 3.0 model
+        response = client.models.generate_content(
+            model="gemini-3-flash-preview",  # Gemini 3.0 Flash model
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="low"  # Low thinking level for faster, lower-cost responses
+                ),
+                temperature=1.0,  # Gemini 3 recommends keeping temperature at default 1.0
+            ),
+        )
+
         if not response or not response.text:
             return {
                 "station": station_name,
                 "recommendations": [],
-                "error": "Gemini API returned empty response"
+                "error": "Gemini API returned empty response",
             }
-        
+
         # Parse JSON from response
         parsed_data = _parse_json_from_response(response.text)
-        
+
         if not parsed_data:
             return {
                 "station": station_name,
                 "recommendations": [],
                 "error": "Failed to parse JSON from Gemini response",
-                "raw_response": response.text[:500]  # Include truncated response for debugging
+                "raw_response": response.text[
+                    :500
+                ],  # Include truncated response for debugging
             }
-        
+
         # Validate structure
         if "recommendations" not in parsed_data:
             return {
                 "station": station_name,
                 "recommendations": [],
-                "error": "Invalid JSON structure: missing 'recommendations' field"
+                "error": "Invalid JSON structure: missing 'recommendations' field",
             }
-        
+
         return parsed_data
-    
+
     except Exception as e:
         print(f"Error calling Gemini API for {station_name}: {e}")
         return {
             "station": station_name,
             "recommendations": [],
-            "error": f"Gemini API call failed: {str(e)}"
+            "error": f"Gemini API call failed: {str(e)}",
         }
 
 
@@ -409,6 +419,41 @@ def root():
     return {"status": "running", "service": "saikai-places-api"}
 
 
+@app.get("/models")
+def list_models():
+    """
+    List all available Gemini models with their version information.
+    Filters to show Gemini models and highlights Gemini 3.0 models.
+    """
+    try:
+        client = get_gemini_client()
+        models = []
+        gemini_3_models = []
+
+        for model in client.models.list():
+            model_info = {
+                "name": model.name,
+                "display_name": model.display_name,
+                "description": model.description,
+                "supported_actions": model.supported_actions,
+            }
+
+            # Separate Gemini 3.0 models
+            if "gemini-3" in model.name:
+                gemini_3_models.append(model_info)
+            else:
+                models.append(model_info)
+
+        return {
+            "gemini_3_models": gemini_3_models,
+            "other_models": models,
+            "recommended": "gemini-3-flash-preview",
+            "note": "Gemini 3.0 models support thinking_level parameter for controlling reasoning depth",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch models: {str(e)}")
+
+
 @app.post("/plan")
 def plan(request: PlanRequest = Body(...)):
     stations = _normalize_station_names(request.station_names)
@@ -433,7 +478,7 @@ def plan(request: PlanRequest = Body(...)):
                 gm, location, request.restaurant_type, language=request.language
             )
             station_data["restaurants"] = restaurants
-            
+
             # Get Gemini recommendations
             gemini_recommendations = _get_gemini_recommendations(
                 station_name, restaurants
@@ -444,7 +489,7 @@ def plan(request: PlanRequest = Body(...)):
             station_data["gemini_recommendations"] = {
                 "station": station_name,
                 "recommendations": [],
-                "error": "Failed to get station location"
+                "error": "Failed to get station location",
             }
 
     return {"input_stations": stations, "middle_stations": results}
