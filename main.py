@@ -7,6 +7,7 @@ import os
 import statistics
 import json
 import re
+from urllib.parse import quote_plus
 from datetime import datetime
 from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Body
@@ -273,10 +274,13 @@ def _search_nearby_restaurants(
                 if photo_ref:
                     photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference={photo_ref}&key={os.environ.get('GMP_API_KEY')}"
 
-            # Build Google Maps URL
+            # Build Google Maps URL (mobile & web compatible)
             place_id = place.get("place_id")
+            place_name = place.get("name") or "place"
             maps_url = (
-                f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+                "https://www.google.com/maps/search/?api=1"
+                f"&query={quote_plus(place_name)}"
+                f"&query_place_id={place_id}"
                 if place_id
                 else None
             )
