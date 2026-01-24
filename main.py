@@ -433,6 +433,7 @@ def _get_gemini_recommendations(
                         "name": google_data["name"],  # Use Google Maps name (canonical)
                         "reason": gemini_rec.get("reason", ""),
                         "recommended_menu": gemini_rec.get("recommended_menu", ""),
+                        "budget": gemini_rec.get("budget", ""),
                         "rating": google_data.get("rating"),
                         "photo_url": google_data.get("photo_url"),
                         "maps_url": google_data.get("maps_url"),
@@ -447,6 +448,7 @@ def _get_gemini_recommendations(
                         "name": gemini_name,
                         "reason": gemini_rec.get("reason", ""),
                         "recommended_menu": gemini_rec.get("recommended_menu", ""),
+                        "budget": gemini_rec.get("budget", ""),
                         "rating": None,
                         "photo_url": None,
                         "maps_url": None,
